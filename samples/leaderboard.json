@@ -1,0 +1,70 @@
+{
+ "path": "/leagues/4/top/scorers/",
+ "status": 200,
+ "body": {
+  "league_id": 4,
+  "team_id": null,
+  "season": {
+   "id": 1375,
+   "name": "Serie A 26/27",
+   "year": 2026,
+   "start_date": "2026-07-01",
+   "end_date": "2027-06-30",
+   "is_current": true,
+   "stages": [
+    {
+     "stage": "regular-season",
+     "stage_name": "Regular season",
+     "matches": 380,
+     "rounds": 38,
+     "start_date": "2026-08-22",
+     "end_date": "2027-05-30"
+    }
+   ]
+  },
+  "stat": "scorers",
+  "label": "Goals",
+  "leaders": [
+   {
+    "rank": 1,
+    "player_id": 515,
+    "player_name": "Donyell Malen",
+    "position": "F",
+    "team_id": 65,
+    "team_name": "AS Roma",
+    "value": 12,
+    "matches": 11
+   },
+   {
+    "rank": 2,
+    "player_id": 1892,
+    "player_name": "Gustavo Varela",
+    "position": "F",
+    "team_id": 1286,
+    "team_name": "Monza",
+    "value": 11,
+    "matches": 11
+   },
+   {
+    "rank": 3,
+    "player_id": 27772,
+    "player_name": "Antonio Raimondo",
+    "position": "F",
+    "team_id": 1277,
+    "team_name": "Frosinone",
+    "value": 8,
+    "matches": 10
+   },
+   {
+    "rank": 4,
+    "player_id": 1311,
+    "player_name": "Nikola Krstović",
+    "position": "F",
+    "team_id": 71,
+    "team_name": "Atalanta",
+    "value": 7,
+    "matches": 12
+   }
+  ]
+ }
+}

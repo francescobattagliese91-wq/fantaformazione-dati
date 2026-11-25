@@ -1,0 +1,49 @@
+{
+ "path": "/players/2004/career/",
+ "status": 200,
+ "body": {
+  "player_id": 2004,
+  "seasons": [
+   {
+    "season_id": 1552,
+    "league_id": 79,
+    "team_id": 63,
+    "matches": 3,
+    "minutes": 156,
+    "goals": 0,
+    "assists": 0,
+    "avg_rating": 6.5
+   },
+   {
+    "season_id": 1491,
+    "league_id": 58,
+    "team_id": 477,
+    "matches": 7,
+    "minutes": 197,
+    "goals": 0,
+    "assists": 1,
+    "avg_rating": 6.7
+   },
+   {
+    "season_id": 1431,
+    "league_id": 64,
+    "team_id": 477,
+    "matches": 3,
+    "minutes": 80,
+    "goals": 0,
+    "assists": 0,
+    "avg_rating": 5.5
+   },
+   {
+    "season_id": 1430,
+    "league_id": 64,
+    "team_id": 477,
+    "matches": 2,
+    "minutes": 0,
+    "goals": 0,
+    "assists": 0,
+    "avg_rating": null
+   }
+  ]
+ }
+}

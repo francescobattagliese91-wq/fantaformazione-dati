@@ -1,0 +1,25 @@
+{
+ "path": "/events/210436/odds/",
+ "status": 200,
+ "body": {
+  "event_id": 210436,
+  "odds": {
+   "home_win": null,
+   "draw": null,
+   "away_win": null,
+   "over_15_goals": null,
+   "over_25_goals": null,
+   "over_35_goals": null,
+   "under_15_goals": null,
+   "under_25_goals": null,
+   "under_35_goals": null,
+   "btts_yes": null,
+   "btts_no": null
+  },
+  "last_update_at": null,
+  "last_change_at": null,
+  "next_update_at": "2026-11-25T22:40:42Z",
+  "update_interval_seconds": 14400,
+  "update_reason": "pre-match, more than a day out"
+ }
+}

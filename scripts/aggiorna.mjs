@@ -1,44 +1,56 @@
 // FantaFormazione — aggiornamento automatico dei dati di Serie A.
-// Gira su GitHub Actions. Legge da API-Football (piano gratuito: max 100 richieste al giorno)
-// e scrive docs/data.json, il file che l'app scarica. Tiene in cache/ quello che non serve riscaricare.
+// Gira su GitHub Actions e legge da BSD (Bzzoiro Sports Data, calcio gratuito).
+// Scrive docs/data.json, il file che l'app scarica. Tiene in cache/ quello che non serve riscaricare.
+// Licenza BSD: si pubblicano solo valori calcolati (stime), non i dati grezzi.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 
-const KEY = process.env.API_FOOTBALL_KEY;
-const BASE = process.env.API_BASE || 'https://v3.football.api-sports.io';
-const LEAGUE = 135;              // Serie A
-const BOOKMAKER = 8;             // bet365
-const MAX_REQ = Number(process.env.MAX_REQ || 90); // margine sotto le 100 giornaliere
+const KEY = process.env.BSD_API_KEY;
+const BASE = process.env.BSD_BASE || 'https://sports.bzzoiro.com/api/v2';
+const LEAGUE = 4;                 // Serie A su BSD
 const NOW = process.env.NOW ? new Date(process.env.NOW) : new Date();
-const PLAYERS_EVERY_DAYS = 6;    // statistiche stagionali: una volta a settimana
+const PAUSE = Number(process.env.PAUSE ?? 150); // ms tra una richiesta e l'altra, per gentilezza
 
-if (!KEY) { console.error('Manca API_FOOTBALL_KEY (Settings → Secrets → Actions)'); process.exit(1); }
+if (!KEY) { console.error('Manca BSD_API_KEY (Settings → Secrets → Actions)'); process.exit(1); }
 
 let used = 0;
-async function api(path, params = {}) {
-  if (used >= MAX_REQ) throw new Error('Limite di richieste raggiunto per oggi');
-  const url = new URL(BASE + path);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  used++;
-  const r = await fetch(url, { headers: { 'x-apisports-key': KEY } });
-  if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
-  const j = await r.json();
-  const errs = j.errors && (Array.isArray(j.errors) ? j.errors : Object.values(j.errors));
-  if (errs && errs.length) throw new Error(`${path} → ${JSON.stringify(j.errors)}`);
-  return j;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function api(path) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    used++;
+    const r = await fetch(BASE + path, { headers: { Authorization: 'Token ' + KEY } });
+    if (r.status === 429 || r.status >= 500) { await sleep(2000 * (attempt + 1)); continue; }
+    if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
+    await sleep(PAUSE);
+    return r.json();
+  }
+  throw new Error(`${path} → non risponde`);
+}
+async function all(path) { // tutte le pagine (limit/offset)
+  const out = []; let offset = 0;
+  for (;;) {
+    const sep = path.includes('?') ? '&' : '?';
+    const j = await api(`${path}${sep}limit=200&offset=${offset}`);
+    const rows = j.results || [];
+    out.push(...rows); offset += rows.length;
+    if (!j.next || !rows.length) return out;
+  }
 }
 const readJSON = async (f, d) => { try { return JSON.parse(await readFile(f, 'utf8')); } catch { return d; } };
 const writeJSON = async (f, o) => { await mkdir(f.split('/').slice(0, -1).join('/'), { recursive: true }); await writeFile(f, JSON.stringify(o)); };
-const days = (a, b) => (b - a) / 86400000;
+const hours = (a, b) => (b - a) / 3600000;
 const num = x => (x == null || x === '' ? 0 : Number(x) || 0);
 const round2 = x => Math.round(x * 100) / 100;
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
-const ROLE = { Goalkeeper: 'P', Defender: 'D', Midfielder: 'C', Attacker: 'A', G: 'P', D: 'D', M: 'C', F: 'A' };
+const ROLE = { G: 'P', D: 'D', M: 'C', F: 'A' };
+const FINISHED = s => ['finished', 'ended', 'ft', 'aet', 'ap'].includes(String(s).toLowerCase());
 
-// Voto stimato dal rating del fornitore (non è il voto dei giornali: serve solo a prevedere).
-const votoDaRating = r => clamp(6 + (num(r) - 6.9) * 0.9, 4, 8.5);
-// Bonus/malus del fantacalcio classico ricavati dalle statistiche
-const bonus = (s, gk) => 3 * num(s.g) + num(s.a) - 0.5 * num(s.y) - num(s.r) - 3 * num(s.pm) + 3 * num(s.ps) - (gk ? num(s.conc) : 0);
-
+// Voto stimato dal rating per partita (scala tipo 6,0-8,0): non è il voto dei giornali, serve solo a prevedere.
+const votoDaRating = r => clamp(6 + (num(r) - 6.85) * 0.9, 4, 8.5);
+// Bonus/malus del fantacalcio classico. Gol e assist sono mescolati a metà con xG e xA: tolgono un po' di fortuna.
+function bonus(s, gk) {
+  const g = s.xg == null ? s.g : .5 * s.g + .5 * s.xg, a = s.xa == null ? s.a : .5 * s.a + .5 * s.xa;
+  return 3 * g + a - .5 * s.y - s.r - 3 * (s.pm || 0) + 3 * (s.ps || 0) - (gk ? s.conc : 0);
+}
 // Dalle quote 1X2 e over 2,5 ai gol attesi delle due squadre (stessa funzione dell'app)
 function pois(l) { const o = []; let p = Math.exp(-l); for (let k = 0; k < 11; k++) { o.push(p); p *= l / (k + 1); } return o; }
 function oddsToGoals(q1, qx, q2, qo) {
@@ -51,155 +63,177 @@ function oddsToGoals(q1, qx, q2, qo) {
   }
   return { lh: round2(best.h), la: round2(best.a) };
 }
+// Rigori dagli eventi della partita: struttura non documentata del tutto, quindi lettura prudente
+function penaltiesFrom(incidents) {
+  const out = [];
+  for (const inc of incidents || []) {
+    const t = JSON.stringify(inc).toLowerCase();
+    if (!t.includes('penalt')) continue;
+    const pid = inc.player_id ?? inc.player?.id ?? inc.playerId;
+    if (!pid) continue;
+    const missed = String(inc.type || '').toLowerCase().includes('miss') || /"reason":"(saved|post|miss)"/.test(t);
+    out.push({ pid, missed, keeper: inc.goalkeeper_id ?? inc.keeper_id ?? null });
+  }
+  return out;
+}
 
 async function main() {
   const meta = await readJSON('cache/meta.json', {});
-  const out = await readJSON('docs/data.json', null);
-  const fullRun = !out || !meta.fullAt || days(new Date(meta.fullAt), NOW) > 0.8 || process.env.FULL === '1';
+  const hist = await readJSON('cache/history.json', { done: [], rows: [], pens: [] });
+  const fullRun = !meta.fullAt || hours(new Date(meta.fullAt), NOW) > 20 || process.env.FULL === '1';
 
-  // 1. Stagione e giornata in corso
-  let season = meta.season, roundName = meta.roundName, fixtures = meta.fixtures || [];
+  // 1. Stagione e calendario completo
+  let season = meta.season, events = meta.events || [];
   if (fullRun) {
-    const lg = await api('/leagues', { id: LEAGUE, current: 'true' });
-    season = lg.response[0].seasons.find(s => s.current)?.year ?? lg.response[0].seasons[0].year;
-    const rd = await api('/fixtures/rounds', { league: LEAGUE, season, current: 'true' });
-    roundName = rd.response[0];
-    const fx = await api('/fixtures', { league: LEAGUE, season, round: roundName });
-    fixtures = fx.response.map(f => ({ id: f.fixture.id, date: f.fixture.date, status: f.fixture.status.short,
-      h: f.teams.home.name, a: f.teams.away.name, hid: f.teams.home.id, aid: f.teams.away.id }));
+    const s = await api(`/leagues/${LEAGUE}/season/`);
+    season = (s.season || s).id;
+    const ev = await all(`/events/?league_id=${LEAGUE}&season_id=${season}`);
+    events = ev.filter(e => e.league_id === LEAGUE).map(e => ({ id: e.id, date: e.event_date, status: e.status, round: e.round_number,
+      h: e.home_team, a: e.away_team, hid: e.home_team_id, aid: e.away_team_id }));
   }
-  const roundNum = Number(String(roundName).match(/(\d+)\s*$/)?.[1] || 0);
+  const upcoming = events.filter(e => !FINISHED(e.status) && !['cancelled', 'postponed'].includes(String(e.status).toLowerCase()))
+    .sort((a, b) => a.date < b.date ? -1 : 1);
+  const round = upcoming[0]?.round || Math.max(0, ...events.map(e => e.round || 0));
+  const roundEvents = events.filter(e => e.round === round);
+  const teamIds = [...new Set(events.flatMap(e => [e.hid, e.aid]))];
 
-  // 2. Statistiche stagionali dei giocatori (una volta a settimana, ~30 richieste)
-  let players = await readJSON('cache/players.json', []);
-  if (fullRun && (!meta.playersAt || days(new Date(meta.playersAt), NOW) > PLAYERS_EVERY_DAYS || !players.length)) {
-    const list = []; let page = 1, total = 1;
-    do {
-      const j = await api('/players', { league: LEAGUE, season, page });
-      total = j.paging?.total || 1;
-      for (const it of j.response) {
-        const st = (it.statistics || []).filter(s => s.league?.id === LEAGUE).sort((a, b) => num(b.games?.appearences) - num(a.games?.appearences))[0];
-        if (!st || !st.team) continue;
-        list.push({ id: it.player.id, name: it.player.name, first: it.player.firstname || '', last: it.player.lastname || it.player.name,
-          tid: st.team.id, club: st.team.name, r: ROLE[st.games?.position] || 'C',
-          apps: num(st.games?.appearences), starts: num(st.games?.lineups), min: num(st.games?.minutes), rating: num(st.games?.rating),
-          g: num(st.goals?.total), a: num(st.goals?.assists), conc: num(st.goals?.conceded), y: num(st.cards?.yellow), r2: num(st.cards?.red),
-          pens: num(st.penalty?.scored) + num(st.penalty?.missed), pm: num(st.penalty?.missed), ps: num(st.penalty?.saved) });
-      }
-      page++;
-    } while (page <= total);
-    players = list; meta.playersAt = NOW.toISOString();
-    await writeJSON('cache/players.json', players);
-  }
-
-  // 3. Voti delle partite giocate (per le ultime 5): solo partite finite non ancora salvate, 1 richiesta ciascuna
-  const hist = await readJSON('cache/history.json', { done: [], rows: [] });
+  // 2. Rose delle 20 squadre, con disponibilità (infortunati, squalificati, in dubbio)
+  let squads = meta.squads || {};
   if (fullRun) {
-    const prev = await api('/fixtures', { league: LEAGUE, season, last: 10 });
-    for (const f of prev.response) {
-      if (!['FT', 'AET', 'PEN'].includes(f.fixture.status.short) || hist.done.includes(f.fixture.id)) continue;
-      if (used >= MAX_REQ - 15) break;
-      const fp = await api('/fixtures/players', { fixture: f.fixture.id });
-      for (const t of fp.response) for (const p of t.players) {
-        const s = p.statistics?.[0]; if (!s) continue;
-        hist.rows.push({ pid: p.player.id, tid: t.team.id, fx: f.fixture.id, date: f.fixture.date, min: num(s.games?.minutes),
-          start: s.games?.substitute === false, rating: s.games?.rating ? num(s.games.rating) : null,
-          g: num(s.goals?.total), a: num(s.goals?.assists), conc: num(s.goals?.conceded), y: num(s.cards?.yellow), r: num(s.cards?.red),
-          pm: num(s.penalty?.missed), ps: num(s.penalty?.saved), gk: s.games?.position === 'G' });
-      }
-      hist.done.push(f.fixture.id);
+    squads = {};
+    for (const tid of teamIds) {
+      const j = await api(`/teams/${tid}/squad/?played_within_days=365`);
+      squads[tid] = (j.players || []).map(p => ({ id: p.id, name: p.name, short: p.short_name, pos: p.position, av: p.availability }));
     }
-    const cut = new Date(NOW - 120 * 86400000).toISOString(); // tiene ~4 mesi
-    hist.rows = hist.rows.filter(r => r.date >= cut);
+  }
+  const teamName = {};
+  for (const e of events) { teamName[e.hid] = e.h; teamName[e.aid] = e.a; }
+
+  // 3. Statistiche delle partite finite (solo quelle non ancora salvate): voti, gol, assist, xG, titolari, rigori
+  if (fullRun) {
+    for (const e of events.filter(e => FINISHED(e.status) && !hist.done.includes(e.id))) {
+      const ps = await api(`/events/${e.id}/player-stats/`);
+      let starters = null;
+      try {
+        const lu = await api(`/events/${e.id}/lineups/`);
+        if (lu.lineups) starters = ['home', 'away'].flatMap(s => (lu.lineups[s]?.players || []).map(p => p.id));
+      } catch { /* formazione non disponibile */ }
+      try { hist.pens.push(...penaltiesFrom((await api(`/events/${e.id}/incidents/`)).incidents).map(p => ({ ...p, ev: e.id }))); } catch { }
+      for (const s of ps.player_stats || []) {
+        if (!(s.minutes_played > 0)) continue;
+        hist.rows.push({ pid: s.player_id, tid: s.team_id, ev: e.id, date: e.date, min: s.minutes_played,
+          start: starters ? starters.includes(s.player_id) : s.minutes_played >= 55,
+          rating: s.rating, g: num(s.goals), a: num(s.goal_assist), xg: s.expected_goals, xa: s.expected_assists,
+          y: num(s.yellow_card), r: num(s.red_card), conc: num(s.goals_conceded) });
+      }
+      hist.done.push(e.id);
+    }
     await writeJSON('cache/history.json', hist);
   }
 
-  // 4. Infortuni e squalifiche per le partite della giornata
-  let injuries = meta.injuries || {};
+  // 4. Quote della giornata → gol attesi
+  let matches = meta.matches || [];
   if (fullRun) {
-    injuries = {};
-    for (const f of fixtures) {
-      if (used >= MAX_REQ - 12) break;
-      const j = await api('/injuries', { fixture: f.id });
-      for (const it of j.response) injuries[it.player.id] = it.player.type === 'Questionable' ? 'B' : 'X';
-    }
-  }
-
-  // 5. Quote → gol attesi
-  let matches = out?.matches && !fullRun ? out.matches : [];
-  if (fullRun) {
-    for (const f of fixtures) {
-      const m = { id: f.id, h: f.h, a: f.a, date: f.date };
-      if (used < MAX_REQ - 12 && !['FT', 'AET', 'PEN'].includes(f.status)) {
+    matches = [];
+    for (const e of roundEvents) {
+      const m = { id: e.id, h: e.h, a: e.a, date: e.date };
+      if (!FINISHED(e.status)) {
         try {
-          const j = await api('/odds', { fixture: f.id, bookmaker: BOOKMAKER });
-          const bets = j.response[0]?.bookmakers?.[0]?.bets || [];
-          const mw = bets.find(b => b.id === 1)?.values || [], ou = bets.find(b => b.id === 5)?.values || [];
-          const q = v => Number(mw.find(x => x.value === v)?.odd), qo = Number(ou.find(x => x.value === 'Over 2.5')?.odd) || null;
-          if (q('Home') > 1 && q('Draw') > 1 && q('Away') > 1) Object.assign(m, { q1: q('Home'), qx: q('Draw'), q2: q('Away'), qo }, oddsToGoals(q('Home'), q('Draw'), q('Away'), qo));
-        } catch (e) { console.warn('Quote non disponibili per', f.h, '-', f.a, e.message); }
+          const o = (await api(`/events/${e.id}/odds/`)).odds || {};
+          if (o.home_win > 1 && o.draw > 1 && o.away_win > 1) {
+            const qo = o.over_25_goals > 1 ? o.over_25_goals : null;
+            Object.assign(m, { q1: o.home_win, qx: o.draw, q2: o.away_win, qo }, oddsToGoals(o.home_win, o.draw, o.away_win, qo));
+          }
+        } catch (err) { console.warn('Quote non disponibili per', e.h, '-', e.a, err.message); }
       }
       matches.push(m);
     }
   }
 
-  // 6. Formazioni ufficiali (escono ~1 ora prima): solo per le partite che iniziano entro 90 minuti
-  const lineups = meta.lineups || {};
-  for (const f of fixtures) {
-    const mins = (new Date(f.date) - NOW) / 60000;
-    if (lineups[f.id] || mins > 90 || mins < -150 || used >= MAX_REQ) continue;
-    const j = await api('/fixtures/lineups', { fixture: f.id });
-    if (j.response.length === 2 && j.response.every(t => (t.startXI || []).length === 11)) {
-      lineups[f.id] = { teams: j.response.map(t => t.team.id), start: j.response.flatMap(t => t.startXI.map(x => x.player.id)), bench: j.response.flatMap(t => t.substitutes.map(x => x.player.id)) };
+  // 5. Formazioni della giornata: probabili (con fiducia) o ufficiali, più indisponibili.
+  //    Nelle corse orarie si aggiornano solo le partite che iniziano entro 3 ore.
+  const lineups = fullRun ? {} : (meta.lineups || {});
+  for (const e of roundEvents) {
+    const h = hours(NOW, new Date(e.date));
+    if (FINISHED(e.status)) continue;
+    if (!fullRun && (h > 3 || h < -2 || lineups[e.id]?.status === 'confirmed')) continue;
+    try {
+      const lu = await api(`/events/${e.id}/lineups/`);
+      const rec = { status: lu.lineup_status, teams: [e.hid, e.aid], start: {}, bench: {}, out: {} };
+      if (lu.lineups) for (const side of ['home', 'away']) {
+        const L = lu.lineups[side]; if (!L) continue;
+        let conf = L.confidence == null ? 1 : Number(L.confidence); if (conf > 1) conf /= 100;
+        (L.players || []).forEach(p => rec.start[p.id] = conf);
+        (L.substitutes || []).forEach(p => rec.bench[p.id] = 1);
+      }
+      for (const side of ['home', 'away']) for (const u of (lu.unavailable_players?.[side] || []))
+        rec.out[u.id] = String(u.status).toLowerCase() === 'doubtful' ? 'B' : 'X';
+      lineups[e.id] = rec;
+    } catch (err) { console.warn('Formazioni non disponibili per', e.h, '-', e.a, err.message); }
+  }
+
+  // 6. Calcolo per ogni giocatore
+  const rowsBy = {}; for (const r of hist.rows) (rowsBy[r.pid] ||= []).push(r);
+  const teamEv = {}; for (const r of hist.rows) (teamEv[r.tid] ||= new Map()).set(r.ev, r.date);
+  const lastTeam = tid => [...(teamEv[tid] || new Map()).entries()].sort((a, b) => a[1] < b[1] ? -1 : 1).slice(-5).map(x => x[0]);
+  const teamGames = tid => (teamEv[tid] || new Map()).size;
+  // rigoristi: rigori calciati in stagione, per squadra
+  const pensBy = {}; for (const p of hist.pens) pensBy[p.pid] = (pensBy[p.pid] || 0) + 1;
+  const missBy = {}; for (const p of hist.pens) if (p.missed) missBy[p.pid] = (missBy[p.pid] || 0) + 1;
+  const penRank = {};
+  for (const [tid, list] of Object.entries(squads)) list.filter(p => pensBy[p.id]).sort((a, b) => pensBy[b.id] - pensBy[a.id]).slice(0, 3).forEach((p, i) => penRank[p.id] = i + 1);
+
+  const surname = p => { const s = p.short || p.name || ''; const m = s.match(/^[A-ZÀ-Ý]\.\s+(.+)$/); return m ? m[1] : (p.name || s).split(' ').slice(-1)[0]; };
+  const count = {}; for (const list of Object.values(squads)) for (const p of list) { const k = surname(p).toLowerCase(); count[k] = (count[k] || 0) + 1; }
+
+  const out = [];
+  for (const [tid, list] of Object.entries(squads)) {
+    const tidN = Number(tid);
+    const lu = Object.values(lineups).find(l => l.teams.includes(tidN));
+    const last5 = lastTeam(tidN), tg = teamGames(tidN);
+    for (const p of list) {
+      const r = ROLE[p.pos] || 'C', gk = r === 'P';
+      const mine = (rowsBy[p.id] || []).sort((a, b) => a.date < b.date ? -1 : 1);
+      const voted = mine.filter(x => x.rating);
+      const pv = voted.length;
+      const mvs = pv ? voted.reduce((s, x) => s + votoDaRating(x.rating), 0) / pv : 6;
+      const pm = missBy[p.id] || 0;
+      const fm = pv ? voted.reduce((s, x) => s + votoDaRating(x.rating) + bonus(x, gk), 0) / pv - 3 * pm / pv : null;
+      const v5 = voted.slice(-5);
+      const fm5 = v5.length >= 3 ? v5.reduce((s, x) => s + votoDaRating(x.rating) + bonus(x, gk), 0) / v5.length : null;
+      // titolarità: 40% stagione + 60% ultime 5 partite della squadra
+      const tSeason = tg ? mine.filter(x => x.start).length / tg : 0;
+      const tRecent = last5.length >= 3 ? mine.filter(x => last5.includes(x.ev) && x.start).length / last5.length : null;
+      let tit = 100 * (tRecent == null ? tSeason : .4 * tSeason + .6 * tRecent);
+      let st = p.av === 'injured' || p.av === 'suspended' ? 'X' : p.av === 'doubtful' ? 'B' : 'T';
+      let lineup = null;
+      if (lu) {
+        if (lu.out[p.id]) st = lu.out[p.id];
+        if (lu.status === 'confirmed') {
+          lineup = 'ufficiale';
+          if (lu.start[p.id] != null) { tit = 99; st = 'T'; } else if (lu.bench[p.id]) { tit = 15; st = 'T'; } else { tit = 0; st = 'X'; }
+        } else if (lu.status === 'predicted') {
+          lineup = 'probabile';
+          if (lu.start[p.id] != null) tit = Math.max(tit, 55 + 40 * clamp(lu.start[p.id], 0, 1));
+          else if (lu.bench[p.id]) tit = Math.min(tit, 30);
+          else tit = Math.min(tit, 10);
+        }
+      }
+      tit = clamp(Math.round(tit / 5) * 5, lineup === 'ufficiale' ? 0 : 3, lineup === 'ufficiale' ? 99 : 95);
+      const sn = surname(p);
+      out.push({ id: p.id, n: count[sn.toLowerCase()] > 1 ? `${sn} ${(p.name || '')[0] || ''}.` : sn, full: p.name, club: teamName[tidN] || '', r, tit, st,
+        fm: fm == null ? null : round2(fm), fm5: fm5 == null ? null : round2(fm5), pv, mv: round2(mvs), rig: penRank[p.id] || 0, lineup });
     }
   }
 
-  // 7. Calcolo per ogni giocatore
-  const byTeam = {};
-  for (const p of players) (byTeam[p.tid] ||= []).push(p);
-  const teamGames = {}; // partite giocate da ogni squadra ≈ presenze del giocatore più presente
-  for (const [tid, ps] of Object.entries(byTeam)) teamGames[tid] = Math.max(1, ...ps.map(p => p.apps));
-  const rowsBy = {}; for (const r of hist.rows) (rowsBy[r.pid] ||= []).push(r);
-  const teamFx = {}; for (const r of hist.rows) (teamFx[r.tid] ||= new Set()).add(r.fx);
-  const lastTeamFx = tid => [...(teamFx[tid] || [])].map(fx => hist.rows.find(r => r.fx === fx && r.tid == tid).date).sort().slice(-5);
-  const penRank = {};
-  for (const ps of Object.values(byTeam)) ps.filter(p => p.pens > 0).sort((a, b) => b.pens - a.pens).slice(0, 3).forEach((p, i) => penRank[p.id] = i + 1);
-  const lastCount = {}; for (const p of players) { const k = p.last.toLowerCase(); lastCount[k] = (lastCount[k] || 0) + 1; }
-
-  const outPlayers = players.map(p => {
-    const gk = p.r === 'P';
-    const pv = players.length ? (p.rating ? p.apps : 0) : 0;
-    const mv = p.rating ? votoDaRating(p.rating) : 6;
-    const fm = pv ? mv + bonus({ g: p.g, a: p.a, y: p.y, r: p.r2, pm: p.pm, ps: p.ps, conc: p.conc }, gk) / pv : null;
-    // ultime 5 con voto
-    const mine = (rowsBy[p.id] || []).sort((a, b) => a.date < b.date ? -1 : 1);
-    const voted = mine.filter(r => r.rating).slice(-5);
-    const fm5 = voted.length >= 3 ? voted.reduce((s, r) => s + votoDaRating(r.rating) + bonus(r, gk), 0) / voted.length : null;
-    // titolarità: stagione + ultime 5 partite della squadra
-    const tSeason = p.starts / teamGames[p.tid];
-    const last5 = lastTeamFx(p.tid);
-    const tRecent = last5.length >= 3 ? mine.filter(r => last5.includes(r.date) && r.start).length / last5.length : null;
-    let tit = 100 * (tRecent == null ? tSeason : .4 * tSeason + .6 * tRecent);
-    tit = clamp(Math.round(tit / 5) * 5, 3, 95);
-    let st = injuries[p.id] || 'T';
-    // formazione ufficiale uscita: comanda lei
-    const lu = Object.values(lineups).find(l => l.teams.includes(p.tid));
-    if (lu) { if (lu.start.includes(p.id)) { tit = 99; st = 'T'; } else if (lu.bench.includes(p.id)) { tit = 15; st = 'T'; } else { tit = 0; st = 'X'; } }
-    const n = lastCount[p.last.toLowerCase()] > 1 && p.first ? `${p.last} ${p.first[0]}.` : p.last;
-    return { id: p.id, n, full: `${p.first} ${p.last}`.trim(), club: p.club, r: p.r, tit, st,
-      fm: fm == null ? null : round2(fm), fm5: fm5 == null ? null : round2(fm5), pv, mv: round2(mv), rig: penRank[p.id] || 0, lineup: !!lu };
-  });
-
-  const data = { v: 1, updated: NOW.toISOString(), season, round: roundNum,
-    note: 'Valori stimati da FantaFormazione su dati di API-Football. Voti e fantamedie sono stime, non i voti ufficiali dei giornali.',
-    matches, players: outPlayers };
+  const data = { v: 1, updated: NOW.toISOString(), season, round,
+    note: 'Valori stimati da FantaFormazione su dati BSD. Voti e fantamedie sono stime, non i voti ufficiali dei giornali.',
+    matches, players: out };
   await writeJSON('docs/data.json', data);
   if (fullRun) meta.fullAt = NOW.toISOString();
-  Object.assign(meta, { season, roundName, fixtures, injuries, lineups });
-  // le formazioni ufficiali vecchie non servono più
-  for (const id of Object.keys(lineups)) if (!fixtures.some(f => String(f.id) === id)) delete lineups[id];
+  Object.assign(meta, { season, events, squads, matches, lineups });
   await writeJSON('cache/meta.json', meta);
-  console.log(`Fatto: ${outPlayers.length} giocatori, ${matches.length} partite (giornata ${roundNum}), ${used} richieste usate.`);
+  console.log(`Fatto: ${out.length} giocatori, ${matches.length} partite (giornata ${round}), ${used} richieste.`);
 }
 
 main().catch(e => { console.error('Errore:', e.message); process.exit(1); });

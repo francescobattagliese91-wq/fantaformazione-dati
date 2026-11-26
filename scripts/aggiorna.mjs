@@ -89,7 +89,7 @@ async function main() {
     season = (s.season || s).id;
     const ev = await all(`/events/?league_id=${LEAGUE}&season_id=${season}`);
     events = ev.filter(e => e.league_id === LEAGUE).map(e => ({ id: e.id, date: e.event_date, status: e.status, round: e.round_number,
-      h: e.home_team, a: e.away_team, hid: e.home_team_id, aid: e.away_team_id }));
+      h: e.home_team, a: e.away_team, hid: e.home_team_id, aid: e.away_team_id, hs: e.home_score, as: e.away_score }));
   }
   const upcoming = events.filter(e => !FINISHED(e.status) && !['cancelled', 'postponed'].includes(String(e.status).toLowerCase()))
     .sort((a, b) => a.date < b.date ? -1 : 1);
@@ -131,7 +131,18 @@ async function main() {
     await writeJSON('cache/history.json', hist);
   }
 
-  // 4. Quote della giornata → gol attesi
+  // 4. Forza delle squadre dai risultati della stagione (serve quando mancano le quote)
+  const played = events.filter(e => FINISHED(e.status) && e.hs != null && e.as != null);
+  const avgH = played.length ? played.reduce((s, e) => s + e.hs, 0) / played.length : 1.45;
+  const avgA = played.length ? played.reduce((s, e) => s + e.as, 0) / played.length : 1.15;
+  const T = {}; const t = id => (T[id] ||= { hf: 0, ha: 0, hn: 0, af: 0, aa: 0, an: 0 });
+  for (const e of played) { const h = t(e.hid), a = t(e.aid); h.hf += e.hs; h.ha += e.as; h.hn++; a.af += e.as; a.aa += e.hs; a.an++; }
+  const K = 4; // partite "virtuali" nella media: con poche partite la forza resta vicina alla media
+  const att = (id, home) => { const x = t(id); return home ? (x.hf + K * avgH) / (x.hn * 1 + K) / avgH : (x.af + K * avgA) / (x.an + K) / avgA; };
+  const def = (id, home) => { const x = t(id); return home ? (x.ha + K * avgA) / (x.hn + K) / avgA : (x.aa + K * avgH) / (x.an + K) / avgH; };
+  const strengthGoals = e => ({ lh: round2(clamp(avgH * att(e.hid, true) * def(e.aid, false), .3, 3.5)), la: round2(clamp(avgA * att(e.aid, false) * def(e.hid, true), .2, 3.2)) });
+
+  // 5. Quote della giornata → gol attesi (se mancano: stima dalla forza delle squadre)
   let matches = meta.matches || [];
   if (fullRun) {
     matches = [];
@@ -145,12 +156,13 @@ async function main() {
             Object.assign(m, { q1: o.home_win, qx: o.draw, q2: o.away_win, qo }, oddsToGoals(o.home_win, o.draw, o.away_win, qo));
           }
         } catch (err) { console.warn('Quote non disponibili per', e.h, '-', e.a, err.message); }
+        if (m.lh == null) Object.assign(m, strengthGoals(e), { stima: true });
       }
       matches.push(m);
     }
   }
 
-  // 5. Formazioni della giornata: probabili (con fiducia) o ufficiali, più indisponibili.
+  // 6. Formazioni della giornata: probabili (con fiducia) o ufficiali, più indisponibili.
   //    Nelle corse orarie si aggiornano solo le partite che iniziano entro 3 ore.
   const lineups = fullRun ? {} : (meta.lineups || {});
   for (const e of roundEvents) {
@@ -172,7 +184,7 @@ async function main() {
     } catch (err) { console.warn('Formazioni non disponibili per', e.h, '-', e.a, err.message); }
   }
 
-  // 6. Calcolo per ogni giocatore
+  // 7. Calcolo per ogni giocatore
   const rowsBy = {}; for (const r of hist.rows) (rowsBy[r.pid] ||= []).push(r);
   const teamEv = {}; for (const r of hist.rows) (teamEv[r.tid] ||= new Map()).set(r.ev, r.date);
   const lastTeam = tid => [...(teamEv[tid] || new Map()).entries()].sort((a, b) => a[1] < b[1] ? -1 : 1).slice(-5).map(x => x[0]);
